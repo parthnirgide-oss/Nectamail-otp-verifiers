@@ -1,0 +1,30 @@
+{
+  
+  "project_info": {
+    "project_number": "523390978386",
+    "project_id": "nectamail-mobile-verification",
+    "storage_bucket": "nectamail-mobile-verification.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:523390978386:android:38e2bb9c0486ec5296528b",
+        "android_client_info": {
+          "package_name": "com.necta.otpverifier"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB37HsLp9irXhJaGgUOFf9T3H1Fq2R0-Dc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
