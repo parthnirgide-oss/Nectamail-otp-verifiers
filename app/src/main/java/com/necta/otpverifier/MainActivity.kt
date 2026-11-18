@@ -2,10 +2,13 @@ package com.necta.otpverifier
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
@@ -45,34 +48,40 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val client = OkHttpClient()
     private val baseUrl = "https://nectamail-otp-backend.vercel.app"
+    private val helpUrl = "https://Contactmeparthnirgide.netlify.app"
     private val prefs by lazy { getSharedPreferences("necta_vault_prefs", Context.MODE_PRIVATE) }
 
-    // Step 1 Launcher: Google Phone Number Hint API
+    // Button 1 Launcher: Google Phone Number Hint Popup
     private val phoneHintLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        try {
-            val rawPhone = Identity.getSignInClient(this).getPhoneNumberFromIntent(result.data)
-            val digits = rawPhone.replace(Regex("\\D"), "")
-            if (digits.length >= 10) {
-                bindHardwareSim(digits, "Google Phone Number Hint")
-            } else {
-                startStep2SubscriptionFallback()
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            try {
+                val rawPhone = Identity.getSignInClient(this).getPhoneNumberFromIntent(result.data)
+                val digits = normalizeIndianOrIntlDigits(rawPhone)
+                if (digits.length >= 10) {
+                    bindHardwareSim(digits, "Google Phone Number Hint")
+                } else {
+                    binding.tvStatus.text = "Google Hint returned an invalid number."
+                }
+            } catch (e: Exception) {
+                binding.tvStatus.text = "Google Hint Parse Error: ${e.message}"
             }
-        } catch (e: Exception) {
-            // Step 1 unavailable or declined -> Immediately fall back to Step 2
-            startStep2SubscriptionFallback()
+        } else {
+            binding.tvStatus.text = "Google Hint cancelled or no number selected. Try Button 2 (Direct SIM Read)."
         }
     }
 
-    // Step 2 Permission Launcher: READ_PHONE_NUMBERS for SubscriptionManager
-    private val readPhonePermLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            readSimFromSubscriptionManager()
+    // Button 2 Launcher: Runtime Permissions (READ_PHONE_NUMBERS + READ_PHONE_STATE)
+    private val simPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val hasNumbers = perms[Manifest.permission.READ_PHONE_NUMBERS] == true
+        val hasState = perms[Manifest.permission.READ_PHONE_STATE] == true
+        if (hasNumbers || hasState) {
+            readSimDirectly()
         } else {
-            binding.tvStatus.text = "Blocked: Hardware SIM verification is mandatory. No manual entry allowed."
+            binding.tvStatus.text = "Permission denied for direct SIM read. Allow Phone permission to bind SIM."
         }
     }
 
@@ -93,7 +102,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        binding.btnVerifySim.setOnClickListener { startStep1PhoneHint() }
+        // Top Help Button -> Opens Contact / Support URL
+        binding.btnHelp.setOnClickListener {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(helpUrl)))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Could not open browser: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Two Separate Verification Buttons
+        binding.btnGoogleHint.setOnClickListener { launchGoogleHint() }
+        binding.btnDirectSim.setOnClickListener { checkAndReadSim() }
+
         binding.swipeRefresh.setOnRefreshListener { refreshInboxAndHistory() }
         binding.btnCopyOtp.setOnClickListener {
             val code = binding.tvActiveOtp.text.toString()
@@ -117,62 +138,89 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // STEP 1: Google Phone Number Hint API (Zero permissions)
-    private fun startStep1PhoneHint() {
-        binding.tvStatus.text = "Checking Google Play Services SIM Hint..."
+    private fun normalizeIndianOrIntlDigits(raw: String): String {
+        val digits = raw.replace(Regex("\\D"), "")
+        return if (digits.length == 10) "91$digits" else digits
+    }
+
+    // METHOD 1: Google Phone Number Hint API (Zero runtime permissions)
+    private fun launchGoogleHint() {
+        binding.tvStatus.text = "Opening Google Play Services SIM Hint..."
         val request = GetPhoneNumberHintIntentRequest.builder().build()
         Identity.getSignInClient(this)
             .getPhoneNumberHintIntent(request)
             .addOnSuccessListener { pendingIntent ->
-                phoneHintLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                phoneHintLauncher.launch(
+                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                )
             }
-            .addOnFailureListener {
-                startStep2SubscriptionFallback()
+            .addOnFailureListener { e ->
+                binding.tvStatus.text =
+                    "Google Hint Failed: ${e.message}\nTry Button 2 (Direct SIM Read) below."
             }
     }
 
-    // STEP 2: SubscriptionManager Direct SIM Fallback
-    private fun startStep2SubscriptionFallback() {
-        binding.tvStatus.text = "Falling back to direct SIM slot verification..."
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            readSimFromSubscriptionManager()
+    // METHOD 2: Direct SIM Read via SubscriptionManager (Matches your working test app)
+    private fun checkAndReadSim() {
+        val hasNumbers = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.READ_PHONE_NUMBERS
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasState = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasNumbers && hasState) {
+            readSimDirectly()
         } else {
-            readPhonePermLauncher.launch(Manifest.permission.READ_PHONE_NUMBERS)
+            simPermissionLauncher.launch(
+                arrayOf(Manifest.permission.READ_PHONE_NUMBERS, Manifest.permission.READ_PHONE_STATE)
+            )
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun readSimFromSubscriptionManager() {
-        try {
-            val subManager = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-            val activeList = subManager.activeSubscriptionInfoList.orEmpty()
-            var detectedDigits = ""
+    private fun readSimDirectly() {
+        val subManager = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+        val subs = try {
+            subManager.activeSubscriptionInfoList
+        } catch (e: SecurityException) {
+            binding.tvStatus.text = "SecurityException: ${e.message}"
+            return
+        }
 
-            for (info in activeList) {
-                val num = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    subManager.getPhoneNumber(info.subscriptionId)
-                } else {
-                    @Suppress("DEPRECATION")
-                    info.number
-                }
-                val clean = (num ?: "").replace(Regex("\\D"), "")
-                if (clean.length >= 10) {
-                    detectedDigits = if (clean.length == 10) "91$clean" else clean
-                    break
-                }
-            }
+        if (subs.isNullOrEmpty()) {
+            binding.tvStatus.text = "Blocked: No active SIM cards detected in device."
+            return
+        }
 
-            if (detectedDigits.length >= 10) {
-                bindHardwareSim(detectedDigits, "SubscriptionManager Hardware SIM")
+        val diagnostics = StringBuilder()
+        var foundDigits = ""
+        var foundCarrier = ""
+
+        for (info in subs) {
+            val number = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                subManager.getPhoneNumber(info.subscriptionId)
             } else {
-                // HARD STOP: Neither Step 1 nor Step 2 found a SIM number
-                binding.tvStatus.text =
-                    "Blocked: No active SIM number readable on this device. Registration denied."
+                @Suppress("DEPRECATION")
+                info.number
             }
-        } catch (e: Exception) {
-            binding.tvStatus.text = "SIM Read Error: ${e.message}"
+
+            if (number.isNullOrBlank()) {
+                diagnostics.append("Slot ${info.simSlotIndex + 1} (${info.carrierName}): [BLANK / NOT WRITTEN ON SIM]\n")
+            } else {
+                val normalized = normalizeIndianOrIntlDigits(number)
+                if (normalized.length >= 10 && foundDigits.isEmpty()) {
+                    foundDigits = normalized
+                    foundCarrier = "Slot ${info.simSlotIndex + 1} (${info.carrierName})"
+                }
+            }
+        }
+
+        if (foundDigits.length >= 10) {
+            bindHardwareSim(foundDigits, "Direct SIM Read • $foundCarrier")
+        } else {
+            binding.tvStatus.text =
+                "Blocked: SIM card chip has no number written by carrier:\n$diagnostics\nUse Button 1 (Google Phone Hint) instead."
         }
     }
 
@@ -196,7 +244,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindHardwareSim(phoneDigits: String, method: String) {
-        binding.tvStatus.text = "Binding SIM via $method..."
+        binding.tvStatus.text = "Binding +$phoneDigits via $method..."
         lifecycleScope.launch {
             try {
                 val fcmToken = FirebaseMessaging.getInstance().token.await()
