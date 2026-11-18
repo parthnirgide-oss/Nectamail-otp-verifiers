@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- White Security Shield -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,26 L32,35.5 V52 C32,66.2 41.4,79.4 54,83 C66.6,79.4 76,66.2 76,52 V35.5 L54,26 Z" />
+    <!-- Blue Checkmark Cutout Inside Shield -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M49.5,63.2 L41.3,55 L44.1,52.2 L49.5,57.6 L63.9,43.2 L66.7,46 L49.5,63.2 Z" />
+</vector>
