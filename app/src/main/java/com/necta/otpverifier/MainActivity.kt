@@ -16,6 +16,7 @@ import android.security.keystore.KeyProperties
 import android.telephony.SubscriptionManager
 import android.util.Base64
 import android.view.View
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
@@ -26,6 +27,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.auth.api.identity.GetPhoneNumberHintIntentRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.material.card.MaterialCardView
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.firebase.messaging.FirebaseMessaging
 import com.necta.otpverifier.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +41,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.Signature
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,6 +53,7 @@ class MainActivity : AppCompatActivity() {
     private val client = OkHttpClient()
     private val baseUrl = "https://nectamail-otp-backend.vercel.app"
     private val helpUrl = "https://Contactmeparthnirgide.netlify.app"
+    private val keyAlias = "necta_device_ec_key"
     private val prefs by lazy { getSharedPreferences("necta_vault_prefs", Context.MODE_PRIVATE) }
 
     // Button 1 Launcher: Google Phone Number Hint Popup
@@ -160,7 +165,7 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // METHOD 2: Direct SIM Read via SubscriptionManager (Matches your working test app)
+    // METHOD 2: Direct SIM Read via SubscriptionManager (Multi-SIM supported)
     private fun checkAndReadSim() {
         val hasNumbers = ContextCompat.checkSelfPermission(
             this, Manifest.permission.READ_PHONE_NUMBERS
@@ -194,8 +199,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val diagnostics = StringBuilder()
-        var foundDigits = ""
-        var foundCarrier = ""
+        val validSims = mutableListOf<Pair<String, String>>()
 
         for (info in subs) {
             val number = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -209,29 +213,42 @@ class MainActivity : AppCompatActivity() {
                 diagnostics.append("Slot ${info.simSlotIndex + 1} (${info.carrierName}): [BLANK / NOT WRITTEN ON SIM]\n")
             } else {
                 val normalized = normalizeIndianOrIntlDigits(number)
-                if (normalized.length >= 10 && foundDigits.isEmpty()) {
-                    foundDigits = normalized
-                    foundCarrier = "Slot ${info.simSlotIndex + 1} (${info.carrierName})"
+                if (normalized.length >= 10) {
+                    val label = "Slot ${info.simSlotIndex + 1} (${info.carrierName}): +$normalized"
+                    validSims.add(Pair(normalized, label))
                 }
             }
         }
 
-        if (foundDigits.length >= 10) {
-            bindHardwareSim(foundDigits, "Direct SIM Read • $foundCarrier")
-        } else {
-            binding.tvStatus.text =
-                "Blocked: SIM card chip has no number written by carrier:\n$diagnostics\nUse Button 1 (Google Phone Hint) instead."
+        when {
+            validSims.size == 1 -> {
+                val (digits, label) = validSims[0]
+                bindHardwareSim(digits, "Direct SIM Read • $label")
+            }
+            validSims.size > 1 -> {
+                val labels = validSims.map { it.second }.toTypedArray()
+                MaterialAlertDialogBuilder(this)
+                    .setTitle("Select SIM to Bind")
+                    .setItems(labels) { _, which ->
+                        val (digits, label) = validSims[which]
+                        bindHardwareSim(digits, "Direct SIM Read • $label")
+                    }
+                    .show()
+            }
+            else -> {
+                binding.tvStatus.text =
+                    "Blocked: SIM card chip has no number written by carrier:\n$diagnostics\nUse Button 1 (Google Phone Hint) instead."
+            }
         }
     }
 
     private fun getOrCreateHardwarePublicKey(): String {
-        val alias = "necta_device_ec_key"
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (!keyStore.containsAlias(alias)) {
+        if (!keyStore.containsAlias(keyAlias)) {
             val kpg = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
             kpg.initialize(
                 KeyGenParameterSpec.Builder(
-                    alias,
+                    keyAlias,
                     KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
                 )
                     .setDigests(KeyProperties.DIGEST_SHA256)
@@ -239,8 +256,20 @@ class MainActivity : AppCompatActivity() {
             )
             kpg.generateKeyPair()
         }
-        val pubKeyBytes = keyStore.getCertificate(alias).publicKey.encoded
+        val pubKeyBytes = keyStore.getCertificate(keyAlias).publicKey.encoded
         return Base64.encodeToString(pubKeyBytes, Base64.NO_WRAP)
+    }
+
+    private fun signWithHardwareKey(payload: String): String {
+        getOrCreateHardwarePublicKey()
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val privateKey = keyStore.getKey(keyAlias, null) as PrivateKey
+
+        val sig = Signature.getInstance("SHA256withECDSA").apply {
+            initSign(privateKey)
+            update(payload.toByteArray(Charsets.UTF_8))
+        }
+        return Base64.encodeToString(sig.sign(), Base64.NO_WRAP)
     }
 
     private fun bindHardwareSim(phoneDigits: String, method: String) {
@@ -249,11 +278,15 @@ class MainActivity : AppCompatActivity() {
             try {
                 val fcmToken = FirebaseMessaging.getInstance().token.await()
                 val pubKey = getOrCreateHardwarePublicKey()
+                val timestamp = System.currentTimeMillis().toString()
+                val signature = signWithHardwareKey("$phoneDigits:$fcmToken:$timestamp")
 
                 val json = JSONObject().apply {
                     put("phoneNumber", phoneDigits)
                     put("fcmToken", fcmToken)
                     put("publicKey", pubKey)
+                    put("timestamp", timestamp)
+                    put("signature", signature)
                     put("deviceName", "${Build.MANUFACTURER} ${Build.MODEL}")
                 }
 
@@ -269,7 +302,7 @@ class MainActivity : AppCompatActivity() {
                 if (resJson.optBoolean("success")) {
                     prefs.edit().putString("verified_phone", phoneDigits).apply()
                     binding.tvSimNumber.text = "+$phoneDigits"
-                    binding.tvStatus.text = "Bound & Protected ($method)"
+                    binding.tvStatus.text = "Bound & Hardware-Locked ($method)"
                     refreshInboxAndHistory()
                 } else {
                     binding.tvStatus.text = "Bind Failed: ${resJson.optString("error")}"
@@ -288,16 +321,24 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
+                val timestamp = System.currentTimeMillis().toString()
+                val signature = signWithHardwareKey("HISTORY:$phone:$timestamp")
+
                 val responseBody = withContext(Dispatchers.IO) {
                     val req = Request.Builder()
                         .url("$baseUrl/api/otp/history/$phone")
+                        .addHeader("X-Timestamp", timestamp)
+                        .addHeader("X-Device-Signature", signature)
                         .get()
                         .build()
                     client.newCall(req).execute().body?.string().orEmpty()
                 }
 
                 val resJson = JSONObject(responseBody)
-                if (!resJson.optBoolean("success")) return@launch
+                if (!resJson.optBoolean("success")) {
+                    binding.tvStatus.text = "Sync blocked: ${resJson.optString("error")}"
+                    return@launch
+                }
 
                 val history = resJson.getJSONArray("history")
                 binding.historyContainer.removeAllViews()
@@ -321,9 +362,9 @@ class MainActivity : AppCompatActivity() {
                     val card = MaterialCardView(this@MainActivity).apply {
                         radius = 28f
                         strokeWidth = 2
-                        val lp = android.widget.LinearLayout.LayoutParams(
-                            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                        val lp = LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
                         )
                         lp.bottomMargin = 20
                         layoutParams = lp
